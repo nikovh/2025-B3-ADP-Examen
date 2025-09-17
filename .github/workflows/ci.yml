@@ -28,13 +28,14 @@ jobs:
       uses: actions/cache@v4
       with:
         path: ~/.m2/repository 
-        key: ${{ runner.os }}-maven-${{ hashFiles('**/pom.xml') }} 
+        key: ${{ runner.os }}-maven-${{ hashFiles('examen/pom.xml') }} 
         restore-keys: |
           ${{ runner.os }}-maven-
 
     # Compila, prueba y empaqueta el proyecto.
     - name: Build, Test, and Package with Maven
       run: mvn -B clean verify
+      working-directory: examen
 
 
     # Upload JUnit test results
@@ -44,13 +45,8 @@ jobs:
       with:
         name: junit-test-results
         path: |
-          target/surefire-reports/
-          target/failsafe-reports/
+          target/surefire-reports/**/*.xml
+          target/failsafe-reports/**/*.xml
+        if-no-files-found: ignore
 
-    - name: Upload build artifact
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: app-build
-        path: target/*.jar
 
