@@ -1,0 +1,117 @@
+name: ci-cd
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      force_rollback:
+        description: "Force a rollback after switching to BLUE"
+        type: boolean
+        default: false
+
+jobs:
+  build-test-deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      APP_DIR: examen
+      IMAGE_NAME: examen
+      VERSION: ${{ github.sha }}
+      GREEN_TAG: latest
+      BLUE_TAG: ${{ github.sha }}
+      GREEN_VERSION: green-stable
+      BLUE_VERSION: ${{ github.sha }}
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Set up Java 17
+      uses: actions/setup-java@v4
+      with:
+        distribution: temurin
+        java-version: "17"
+        cache: maven
+
+    - name: Build and test (unit + integration)
+      working-directory: ${{ env.APP_DIR }}
+      run: |
+        # Si Jacoco falla por cobertura insuficiente, añade tests o, temporalmente, usa:
+        # mvn -B -q -DskipTests package
+        mvn -B -q clean verify
+
+    - name: Build Docker image
+      run: |
+        docker build -t $IMAGE_NAME:${VERSION} -t $IMAGE_NAME:latest -f $APP_DIR/Dockerfile $APP_DIR
+        docker image ls | grep $IMAGE_NAME
+
+    - name: Prepare infra files
+      run: |
+        mkdir -p deploy/nginx scripts evidence
+
+    - name: Make scripts executable
+      run: chmod +x scripts/*.sh
+
+    - name: Start GREEN (test env) and run acceptance
+      env:
+        IMAGE_NAME: ${{ env.IMAGE_NAME }}
+        GREEN_TAG: ${{ env.GREEN_TAG }}
+        BLUE_TAG: ${{ env.BLUE_TAG }}
+        GREEN_VERSION: ${{ env.GREEN_VERSION }}
+        BLUE_VERSION: ${{ env.BLUE_VERSION }}
+      run: |
+        docker compose -f deploy/docker-compose.yml up -d router app-green
+        ./scripts/acceptance.sh http://localhost:8080 "${GREEN_VERSION}" | tee -a evidence/acceptance-green.log
+
+    - name: Deploy BLUE (candidate) and pre-switch acceptance
+      env:
+        IMAGE_NAME: ${{ env.IMAGE_NAME }}
+        GREEN_TAG: ${{ env.GREEN_TAG }}
+        BLUE_TAG: ${{ env.BLUE_TAG }}
+        GREEN_VERSION: ${{ env.GREEN_VERSION }}
+        BLUE_VERSION: ${{ env.BLUE_VERSION }}
+      run: |
+        docker compose -f deploy/docker-compose.yml --profile blue up -d app-blue
+        ./scripts/acceptance.sh http://localhost:18081 "${BLUE_VERSION}" | tee -a evidence/acceptance-blue.log
+
+    - name: Blue-Green switch with rollback on failure
+      env:
+        BLUE_VERSION: ${{ env.BLUE_VERSION }}
+        GREEN_VERSION: ${{ env.GREEN_VERSION }}
+      run: |
+        set -e
+        ./scripts/blue_green_deploy.sh switch blue
+        if [[ "${FORCE_ROLLBACK}" == "true" ]]; then
+          echo "FORCE_ROLLBACK active. Simulando fallo post-switch." | tee -a evidence/after-switch.log
+          false
+        fi
+        if ./scripts/acceptance.sh http://localhost:8080 "${BLUE_VERSION}" | tee -a evidence/after-switch.log; then
+          echo "Blue is healthy after switch" | tee -a evidence/after-switch.log
+        else
+          echo "Validation failed. Rolling back to GREEN..." | tee -a evidence/after-switch.log
+          ./scripts/blue_green_deploy.sh switch green
+          ./scripts/acceptance.sh http://localhost:8080 "${GREEN_VERSION}" | tee -a evidence/rollback.log || true
+          exit 1
+        fi
+
+    - name: Collect docker-compose logs
+      if: always()
+      run: |
+        docker compose -f deploy/docker-compose.yml ps -a | tee evidence/compose-ps.txt || true
+        docker compose -f deploy/docker-compose.yml logs --no-color router app-green app-blue > evidence/compose-logs.txt 2>&1 || true
+        docker exec router nginx -T > evidence/nginx-config.txt 2>&1 || true
+
+    - name: Upload evidence artifacts
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: evidence
+        path: evidence/
+
+    - name: Teardown environment
+      if: always()
+      run: |
+        docker compose -f deploy/docker-compose.yml down -v || true
+

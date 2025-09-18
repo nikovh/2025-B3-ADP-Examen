@@ -1,0 +1,35 @@
+version: "3.8"
+
+services:
+  app-green:
+    image: ${IMAGE_NAME:-examen}:${GREEN_TAG:-latest}
+    container_name: app-green
+    environment:
+      - APP_VERSION=${GREEN_VERSION:-green-stable}
+    expose:
+      - "8080"
+    ports:
+      - "18080:8080"
+
+  app-blue:
+    image: ${IMAGE_NAME:-examen}:${BLUE_TAG:-latest}
+    container_name: app-blue
+    environment:
+      - APP_VERSION=${BLUE_VERSION:-candidate}
+    expose:
+      - "8080"
+    ports:
+      - "18081:8080"
+    profiles: ["blue"]
+
+  router:
+    image: nginx:alpine
+    container_name: router
+    ports:
+      - "8080:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/conf.d:/etc/nginx/conf.d
+    depends_on:
+      - app-green
+    restart: unless-stopped
