@@ -8,6 +8,7 @@ on:
     inputs:
       force_rollback:
         description: "Force a rollback after switching to BLUE"
+        required: true
         type: boolean
         default: false
 
